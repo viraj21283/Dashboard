@@ -6,26 +6,34 @@ import plotly.graph_objs as go
 st.set_page_config(page_title="Universal Data Dashboard", layout="wide")
 st.title("📊 Universal Data Dashboard")
 
-uploaded_file = st.file_uploader("Upload your CSV file", type="csv")
-
 def percent_change(start, end):
     if start == 0 or pd.isnull(start) or pd.isnull(end):
         return None
     return 100 * (end - start) / abs(start)
+
+uploaded_file = st.file_uploader("Upload your CSV file", type="csv")
 
 if uploaded_file is not None:
     df = pd.read_csv(uploaded_file)
 
     # --- Date/time detection ---
     date_columns = [col for col in df.columns if any(key in col.lower() for key in ["date", "time"])]
-    if date_columns:
-        for col in date_columns:
-            df[col] = pd.to_datetime(df[col], errors='coerce')
-        df = df.dropna(subset=date_columns)
-        df = df.sort_values(by=date_columns[0])
-        date_col = st.selectbox("Select Date/Time column (for filtering):", date_columns)
+    for col in date_columns:
+        df[col] = pd.to_datetime(df[col], errors='coerce')
+    date_col = date_columns[0] if date_columns else None
+
+    st.subheader("Preview (first 10 rows)")
+    st.dataframe(df.head(10))
+
+    # --- Filter by date if detected ---
+    if date_col:
+        # Drop rows with missing or invalid dates
+        df = df.dropna(subset=[date_col])
+        df = df.sort_values(by=date_col)
         min_date, max_date = df[date_col].min(), df[date_col].max()
-        period_option = st.selectbox("Period", ["All", "1 Month", "3 Months", "6 Months", "1 Year", "Custom"])
+
+        st.write("**Date range in data:** {} to {} | Rows: {}".format(min_date.date(), max_date.date(), len(df)))
+        period_option = st.selectbox("Select period", ["All", "1 Month", "3 Months", "6 Months", "1 Year", "Custom"])
         if period_option == "1 Month":
             start_date = max_date - pd.DateOffset(months=1)
             end_date = max_date
@@ -53,61 +61,60 @@ if uploaded_file is not None:
     else:
         filtered_df = df
 
-    # --- Numeric and categorical columns ---
+    # --- Numeric & categorical columns ---
     numeric_cols = list(filtered_df.select_dtypes(include='number').columns)
-    non_numeric_cols = [col for col in filtered_df.columns if col not in numeric_cols]
-    
-    # --- Key Automatic Stat Boxes (per numeric column) ---
-    st.subheader("Key Stats (auto for numeric columns)")
-    if numeric_cols:
-        stat_cols = st.columns(min(4, len(numeric_cols)))
-        for idx, col in enumerate(numeric_cols):
-            ser = filtered_df[col]
-            # For time series, show initial and recent, else global min/max
-            rec_val = ser.iloc[-1]
-            prev_val = ser.iloc[0] if len(ser) > 0 else rec_val
-            pc = percent_change(prev_val, rec_val)
-            stat_cols[idx % 4].metric(f"{col} (latest)", f"{rec_val:,.2f}")
-            stat_cols[idx % 4].write(
-                f"Min: {ser.min():,.2f}\n\n"
-                f"Max: {ser.max():,.2f}\n\n"
-                f"Mean: {ser.mean():,.2f}\n\n"
-                f"Sum: {ser.sum():,.2f}\n\n"
-                f"Std Dev: {ser.std():,.2f}\n\n"
-                + (f"% Change: {pc:.2f}%" if pc is not None else "")
-            )
-    else:
-        st.info("No numeric columns detected for stats.")
+    obj_cols = [col for col in filtered_df.columns if col not in numeric_cols and filtered_df[col].dtype=='object']
 
-    # --- Custom Stat Box (user selects numeric column) ---
+    # --- Key Stats for all numeric columns ---
     if numeric_cols:
-        st.subheader("Custom Stat Box")
+        st.subheader(":bar_chart: Key Stats (Numeric Columns)")
+        for col in numeric_cols:
+            stat1, stat2, stat3 = st.columns(3)
+            ser = filtered_df[col].dropna()
+            if len(ser) == 0:
+                stat1.metric(f"{col}", "No data")
+                continue
+            minv, maxv = float(ser.min()), float(ser.max())
+            meanv, medv, stdv, sumv = float(ser.mean()), float(ser.median()), float(ser.std()), float(ser.sum())
+            recval, firstval = float(ser.iloc[-1]), float(ser.iloc[0])
+            pc = percent_change(firstval, recval)
+            stat1.metric(f"{col} (Latest)", f"{recval:,.2f}")
+            stat1.metric(f"Min", f"{minv:,.2f}")
+            stat2.metric(f"Mean", f"{meanv:,.2f}")
+            stat2.metric(f"Std Dev", f"{stdv:,.2f}")
+            stat3.metric(f"Sum", f"{sumv:,.2f}")
+            if pc is not None:
+                stat3.metric("% Change", f"{pc:.2f}%")
+
+    # --- Custom Stat Box ---
+    if numeric_cols:
+        st.subheader("🔎 Custom Stat Box")
         col_custom = st.selectbox("Show stats for column:", numeric_cols, key="customstats")
-        ser = filtered_df[col_custom]
-        st.write({
-            "Recent": ser.iloc[-1] if len(ser) > 0 else None,
-            "First": ser.iloc[0] if len(ser) > 0 else None,
-            "Min": ser.min(),
-            "Max": ser.max(),
-            "Mean": ser.mean(),
-            "Median": ser.median(),
-            "Std Dev": ser.std(),
-            "Sum": ser.sum(),
-            "% Change": percent_change(ser.iloc[0], ser.iloc[-1]) if len(ser)>1 else None
-        })
+        ser = filtered_df[col_custom].dropna()
+        if len(ser):
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Latest", f"{float(ser.iloc[-1]):,.2f}")
+            col1.metric("First", f"{float(ser.iloc[0]):,.2f}")
+            col2.metric("Min", f"{ser.min():,.2f}")
+            col2.metric("Max", f"{ser.max():,.2f}")
+            col3.metric("Mean", f"{ser.mean():,.2f}")
+            col3.metric("Std Dev", f"{ser.std():,.2f}")
+            col1.metric("Sum", f"{ser.sum():,.2f}")
+            pc = percent_change(float(ser.iloc[0]), float(ser.iloc[-1])) if len(ser)>1 else None
+            col2.metric("% Change", f"{pc:.2f}%" if pc is not None else "-")
+        else:
+            st.write("No data.")
 
-    # --- Top categories (if col with few unique values) ---
-    cat_cols = [col for col in non_numeric_cols if filtered_df[col].nunique() < 20 and filtered_df[col].dtype == 'object']
+    # --- Top categories (if categorical column has <20 unique values) ---
+    cat_cols = [col for col in obj_cols if filtered_df[col].nunique() < 20]
     if cat_cols:
-        st.subheader("Top categories (counts):")
+        st.subheader(":1234: Top categories")
         for col in cat_cols:
-            st.write(f"{col}:")
-            st.write(filtered_df[col].value_counts())
-
-    st.subheader("Preview (top 10 rows)")
-    st.dataframe(filtered_df.head(10))
+            st.write(f"**{col}:**")
+            st.dataframe(filtered_df[col].value_counts().to_frame('count'))
 
     # --- Chart section ---
+    st.subheader("📈 Visualization")
     chart_types = ["Bar", "Line", "Pie", "Scatter"]
     # Candlestick if OHLC present
     ohlc_cols = dict(
@@ -116,15 +123,14 @@ if uploaded_file is not None:
         low=[c for c in numeric_cols if "low" in c.lower()],
         close=[c for c in numeric_cols if "close" in c.lower()]
     )
-    if date_columns and all(ohlc_cols.values()):
+    if date_col and all(ohlc_cols.values()):
         chart_types.insert(0, "Candlestick")
-
     chart_type = st.selectbox("Chart type", chart_types)
-    # For sensible axis selection
-    axis_x_cand = date_columns + [col for col in non_numeric_cols if filtered_df[col].dtype == 'object']
+
+    axis_x_cand = ([date_col] if date_col else []) + [c for c in obj_cols]
     axis_y_cand = numeric_cols
 
-    if chart_type == "Candlestick" and date_columns and all(ohlc_cols.values()):
+    if chart_type == "Candlestick" and date_col and all(ohlc_cols.values()):
         fig = go.Figure(
             go.Candlestick(
                 x=filtered_df[date_col],
@@ -134,12 +140,12 @@ if uploaded_file is not None:
                 close=filtered_df[ohlc_cols['close'][0]]))
         fig.update_layout(xaxis_title=date_col, yaxis_title="Price")
         st.plotly_chart(fig, use_container_width=True)
-    elif chart_type == "Pie":
+    elif chart_type == "Pie" and axis_x_cand and axis_y_cand:
         pie_label = st.selectbox("Pie labels (categorical)", axis_x_cand)
         pie_value = st.selectbox("Pie values (numeric)", axis_y_cand)
         fig = px.pie(filtered_df, names=pie_label, values=pie_value)
         st.plotly_chart(fig, use_container_width=True)
-    elif chart_type in ["Bar", "Line", "Scatter"]:
+    elif chart_type in ["Bar", "Line", "Scatter"] and axis_x_cand and axis_y_cand:
         x_axis = st.selectbox("X-axis", axis_x_cand)
         y_axis = st.selectbox("Y-axis", axis_y_cand)
         if chart_type == "Bar":
@@ -149,9 +155,11 @@ if uploaded_file is not None:
         elif chart_type == "Scatter":
             fig = px.scatter(filtered_df, x=x_axis, y=y_axis)
         st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Choose chart axes and upload compatible data for this chart.")
+
 else:
     st.info("Upload a CSV file to see the dashboard features.")
 
 # Save as: universal_dashboard.py
 # Run with: streamlit run universal_dashboard.py
-
