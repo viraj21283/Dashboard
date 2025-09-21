@@ -8,35 +8,24 @@ st.title("📊 Universal Data Dashboard")
 
 uploaded_file = st.file_uploader("Upload your CSV file", type="csv")
 
+def percent_change(start, end):
+    if start == 0 or pd.isnull(start) or pd.isnull(end):
+        return None
+    return 100 * (end - start) / abs(start)
+
 if uploaded_file is not None:
     df = pd.read_csv(uploaded_file)
 
-    # Try to detect date columns
-    date_columns = [col for col in df.columns if pd.api.types.is_datetime64_any_dtype(df[col]) or
-                    (df[col].dtype == object and
-                     any(k in col.lower() for k in ['date', 'time', 'day']) )]
-
+    # --- Date/time detection ---
+    date_columns = [col for col in df.columns if any(key in col.lower() for key in ["date", "time"])]
     if date_columns:
-        # Attempt conversion
         for col in date_columns:
-            df[col] = pd.to_datetime(df[col], errors='ignore')
-
-    st.subheader("Preview (first 10 rows)")
-    st.dataframe(df.head(10))
-
-    # Select date column for period filtering (if available)
-    filter_by_date = False
-    if date_columns:
-        date_col = st.selectbox("Select date/time column (for period filtering):", date_columns)
-        filter_by_date = True
-
-        # Remove rows with missing dates in selected column
-        df = df.dropna(subset=[date_col])
-        df = df.sort_values(by=date_col)
+            df[col] = pd.to_datetime(df[col], errors='coerce')
+        df = df.dropna(subset=date_columns)
+        df = df.sort_values(by=date_columns[0])
+        date_col = st.selectbox("Select Date/Time column (for filtering):", date_columns)
         min_date, max_date = df[date_col].min(), df[date_col].max()
-
-        # Period filtering
-        period_option = st.selectbox("Select period", ["All", "1 Month", "3 Months", "6 Months", "1 Year", "Custom"])
+        period_option = st.selectbox("Period", ["All", "1 Month", "3 Months", "6 Months", "1 Year", "Custom"])
         if period_option == "1 Month":
             start_date = max_date - pd.DateOffset(months=1)
             end_date = max_date
@@ -52,83 +41,117 @@ if uploaded_file is not None:
         elif period_option == "Custom":
             col1, col2 = st.columns(2)
             with col1:
-                start_date = st.date_input("Start date", value=min_date.date(), min_value=min_date.date(), max_value=max_date.date())
+                start_date = st.date_input("Start date", min_value=min_date.date(), max_value=max_date.date(), value=min_date.date())
             with col2:
-                end_date = st.date_input("End date", value=max_date.date(), min_value=min_date.date(), max_value=max_date.date())
+                end_date = st.date_input("End date", min_value=min_date.date(), max_value=max_date.date(), value=max_date.date())
             start_date = pd.to_datetime(start_date)
             end_date = pd.to_datetime(end_date)
-        else:  # All
+        else:
             start_date, end_date = min_date, max_date
-
-        # Filter
         filtered_df = df[(df[date_col] >= start_date) & (df[date_col] <= end_date)]
-        st.write(f"Selected period: {start_date.date()} to {end_date.date()} | Rows: {len(filtered_df)}")
+        st.caption(f"Selected period: {start_date.date()} to {end_date.date()} | Rows: {len(filtered_df)}")
     else:
         filtered_df = df
 
-    # Show only numeric columns in summary
-    numeric_cols = filtered_df.select_dtypes(include=['number']).columns
-    if len(numeric_cols) > 0:
-        st.subheader("Summary Statistics (Numeric Columns)")
-        st.write(filtered_df[numeric_cols].describe())
+    # --- Numeric and categorical columns ---
+    numeric_cols = list(filtered_df.select_dtypes(include='number').columns)
+    non_numeric_cols = [col for col in filtered_df.columns if col not in numeric_cols]
+    
+    # --- Key Automatic Stat Boxes (per numeric column) ---
+    st.subheader("Key Stats (auto for numeric columns)")
+    if numeric_cols:
+        stat_cols = st.columns(min(4, len(numeric_cols)))
+        for idx, col in enumerate(numeric_cols):
+            ser = filtered_df[col]
+            # For time series, show initial and recent, else global min/max
+            rec_val = ser.iloc[-1]
+            prev_val = ser.iloc[0] if len(ser) > 0 else rec_val
+            pc = percent_change(prev_val, rec_val)
+            stat_cols[idx % 4].metric(f"{col} (latest)", f"{rec_val:,.2f}")
+            stat_cols[idx % 4].write(
+                f"Min: {ser.min():,.2f}\n\n"
+                f"Max: {ser.max():,.2f}\n\n"
+                f"Mean: {ser.mean():,.2f}\n\n"
+                f"Sum: {ser.sum():,.2f}\n\n"
+                f"Std Dev: {ser.std():,.2f}\n\n"
+                + (f"% Change: {pc:.2f}%" if pc is not None else "")
+            )
     else:
-        st.warning("No numeric columns detected for summary statistics.")
+        st.info("No numeric columns detected for stats.")
 
-    # Axis selection: X can be date or categorical; Y: only numeric columns
-    axis_x_candidates = [c for c in filtered_df.columns if c in date_columns or
-                         filtered_df[c].dtype == 'object' or filtered_df[c].dtype.name == 'category']
-    axis_y_candidates = list(numeric_cols)
+    # --- Custom Stat Box (user selects numeric column) ---
+    if numeric_cols:
+        st.subheader("Custom Stat Box")
+        col_custom = st.selectbox("Show stats for column:", numeric_cols, key="customstats")
+        ser = filtered_df[col_custom]
+        st.write({
+            "Recent": ser.iloc[-1] if len(ser) > 0 else None,
+            "First": ser.iloc[0] if len(ser) > 0 else None,
+            "Min": ser.min(),
+            "Max": ser.max(),
+            "Mean": ser.mean(),
+            "Median": ser.median(),
+            "Std Dev": ser.std(),
+            "Sum": ser.sum(),
+            "% Change": percent_change(ser.iloc[0], ser.iloc[-1]) if len(ser)>1 else None
+        })
 
-    # Special: Candlestick for OHLC data
-    o_col = [c for c in filtered_df.columns if c.lower().startswith("o") and "open" in c.lower()]
-    h_col = [c for c in filtered_df.columns if c.lower().startswith("h") and "high" in c.lower()]
-    l_col = [c for c in filtered_df.columns if c.lower().startswith("l") and "low" in c.lower()]
-    c_col = [c for c in filtered_df.columns if c.lower().startswith("c") and "close" in c.lower()]
+    # --- Top categories (if col with few unique values) ---
+    cat_cols = [col for col in non_numeric_cols if filtered_df[col].nunique() < 20 and filtered_df[col].dtype == 'object']
+    if cat_cols:
+        st.subheader("Top categories (counts):")
+        for col in cat_cols:
+            st.write(f"{col}:")
+            st.write(filtered_df[col].value_counts())
 
-    # Decide if candlestick chart option is available:
-    candlestick_ready = (filter_by_date and len(o_col) > 0 and len(h_col) > 0 and len(l_col) > 0 and len(c_col) > 0)
+    st.subheader("Preview (top 10 rows)")
+    st.dataframe(filtered_df.head(10))
 
+    # --- Chart section ---
     chart_types = ["Bar", "Line", "Pie", "Scatter"]
-    if candlestick_ready:
-        chart_types.insert(0, "Candlestick (OHLC)")  # add candlestick to start
+    # Candlestick if OHLC present
+    ohlc_cols = dict(
+        open=[c for c in numeric_cols if "open" in c.lower()],
+        high=[c for c in numeric_cols if "high" in c.lower()],
+        low=[c for c in numeric_cols if "low" in c.lower()],
+        close=[c for c in numeric_cols if "close" in c.lower()]
+    )
+    if date_columns and all(ohlc_cols.values()):
+        chart_types.insert(0, "Candlestick")
 
-    chart_type = st.selectbox("Select chart type", chart_types)
+    chart_type = st.selectbox("Chart type", chart_types)
+    # For sensible axis selection
+    axis_x_cand = date_columns + [col for col in non_numeric_cols if filtered_df[col].dtype == 'object']
+    axis_y_cand = numeric_cols
 
-    if chart_type == "Pie" and axis_x_candidates and axis_y_candidates:
-        pie_label = st.selectbox("Pie labels (categorical)", axis_x_candidates)
-        pie_value = st.selectbox("Pie values (numeric)", axis_y_candidates)
-        fig = px.pie(filtered_df, names=pie_label, values=pie_value)
-    elif chart_type == "Candlestick (OHLC)":
-        fig = go.Figure(data=[
+    if chart_type == "Candlestick" and date_columns and all(ohlc_cols.values()):
+        fig = go.Figure(
             go.Candlestick(
-                x=filtered_df[date_col], open=filtered_df[o_col[0]],
-                high=filtered_df[h_col[0]],
-                low=filtered_df[l_col[0]],
-                close=filtered_df[c_col[0]],
-                name='Candlestick')
-        ])
-        fig.update_layout(xaxis_title=str(date_col), yaxis_title="Price")
-    else:
-        x_axis = st.selectbox("X-axis", axis_x_candidates) if axis_x_candidates else None
-        y_axis = st.selectbox("Y-axis", axis_y_candidates) if axis_y_candidates else None
-
-        if chart_type == "Bar" and x_axis and y_axis:
-            fig = px.bar(filtered_df, x=x_axis, y=y_axis)
-        elif chart_type == "Line" and x_axis and y_axis:
-            fig = px.line(filtered_df, x=x_axis, y=y_axis)
-        elif chart_type == "Scatter" and x_axis and y_axis:
-            fig = px.scatter(filtered_df, x=x_axis, y=y_axis)
-        else:
-            fig = None
-
-    st.subheader(f"{chart_type} Chart")
-    if fig is not None:
+                x=filtered_df[date_col],
+                open=filtered_df[ohlc_cols['open'][0]],
+                high=filtered_df[ohlc_cols['high'][0]],
+                low=filtered_df[ohlc_cols['low'][0]],
+                close=filtered_df[ohlc_cols['close'][0]]))
+        fig.update_layout(xaxis_title=date_col, yaxis_title="Price")
         st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Please ensure axes are selected for your chart type, and your data contains the required columns.")
-
+    elif chart_type == "Pie":
+        pie_label = st.selectbox("Pie labels (categorical)", axis_x_cand)
+        pie_value = st.selectbox("Pie values (numeric)", axis_y_cand)
+        fig = px.pie(filtered_df, names=pie_label, values=pie_value)
+        st.plotly_chart(fig, use_container_width=True)
+    elif chart_type in ["Bar", "Line", "Scatter"]:
+        x_axis = st.selectbox("X-axis", axis_x_cand)
+        y_axis = st.selectbox("Y-axis", axis_y_cand)
+        if chart_type == "Bar":
+            fig = px.bar(filtered_df, x=x_axis, y=y_axis)
+        elif chart_type == "Line":
+            fig = px.line(filtered_df, x=x_axis, y=y_axis)
+        elif chart_type == "Scatter":
+            fig = px.scatter(filtered_df, x=x_axis, y=y_axis)
+        st.plotly_chart(fig, use_container_width=True)
 else:
     st.info("Upload a CSV file to see the dashboard features.")
 
 # Save as: universal_dashboard.py
 # Run with: streamlit run universal_dashboard.py
+
